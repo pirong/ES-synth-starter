@@ -27,20 +27,20 @@ The overall development stack looks like this:
 
 ![Synthesiser development stack](synth-stack.png)
 
-Get started by installing Platformio and forking the starter code
+Get started by installing Platformio and cloning the starter code
 
 > [!WARNING]  
 > The first time you open or compile a project in Platformio you may see some tasks that take a long time as the necessary compiler and libraries are installed. Windows seems to be especially slow as all the new files are automatically checked for malware. Do not abort anything because the package installation may be incomplete and Platformio cannot automatically repair broken packages. If compilation fails due to missing files, you can delete the appropriate package directory from `<your home directory\.platformio\packages` and Platformio will install it when you next compile.
 
 1. Install Visual Studio Code, if you don’t have it already, and add Platformio from the website, or by searching for it in the VS Code extensions marketplace
-2. Fork the starter code from GitHub. You can use the GitHub extension for VS Code, use git from the command line or any other client, or download the zipped project files from GitHub. Open the project folder in VS Code
+2. Clone the starter code from GitHub. Do not make a fork because you will not be able to make the repository private - instead, commit the contents to a new repository. You can use the GitHub extension for VS Code, use git from the command line or any other client, or download the zipped project files from GitHub. Open the project folder in VS Code
 3. Switch to the Platformio Home tab with the 🏠 button on the bottom toolbar and select the libraries view. Search for the U8g2 display driver library, select the latest version and add it to the project.
 4. (Windows only) Install the [STLINK driver](https://www.st.com/en/development-tools/stsw-link009.html). A copy is available in Teams if you want to avoid creating an account.
 5. Connect the microcontroller module on the synth to your computer with a USB cable.
 6. Compile and the code and flash it to the MCU using the → button on the bottom toolbar
 7. The ‘Hello World’ message should appear on the OLED display.
 8. Open the serial monitor using the 🔌 button on the toolbar.
-   Press the reset button on the synth (SW19) or the MCU module (B1) and you will see the `Hello World’ message on the terminal
+   Press the reset button on the synth (SW1 or SW19) or the MCU module (B1, StackSynth V1.x only) and you will see the `Hello World’ message on the terminal
    
 ![Hello World](hello-world.jpg)
 
@@ -96,7 +96,7 @@ The keys and knobs on the keyboard module are connected to a key matrix, which a
 
       ```c++
       std::bitset<4> inputs = readCols();
-      u8g2.setCursor(2,20);
+      u8g2.setCursor(0,20);
       u8g2.print(inputs.to_ulong(),HEX); 
       ```
 			
@@ -125,7 +125,7 @@ The keys and knobs on the keyboard module are connected to a key matrix, which a
       std::bitset<32> inputs;
       ```
 
-      Place a for loop around your call to `readCols()`.
+      Place a `for` loop around your call to `readCols()`.
 			This will be the key scanning loop and it should loop over the row numbers 0 to 2.
 			For each row, it should set the row select address then read the columns and copy the results into the `inputs` bitset
       
@@ -230,7 +230,7 @@ $$S=\frac{2^{32}f}{f_\mathrm{s}}$$
 	It will be an interrupt service routine, which means that it cannot have arguments or a return value.
 	The function will be triggered by an interrupt 22,000 times per second.
 	It will add currentStepSize to the phase accumulator to generate the output waveform.
-	Define the phase accumulator as a static local variable, so that its value will be stored between successive calls of `sampleISR()`:
+	Define the phase accumulator as a static local variable, so that its value will be remembered between successive calls of `sampleISR()`:
 
 	```C++
 	static uint32_t phaseAcc = 0;
@@ -253,7 +253,7 @@ $$S=\frac{2^{32}f}{f_\mathrm{s}}$$
 	
 	You may wonder why 128 is subtracted, then added again.
 	In future, you will need to multiply and add signals, for example to implement a volume control or polyphony.
-	That will be easier when samples have an offset of zero because the offset will be unaffected by mathematical operations.
+	That will be easier when samples have mean value of zero because the offset will be unaffected by mathematical operations.
 	Meanwhile, the phase accumulator itself cannot have a zero offset because that would require a signed integer and the overflow of signed integers results in undefined behaviour in C and C++.
 	
 
@@ -284,7 +284,7 @@ $$S=\frac{2^{32}f}{f_\mathrm{s}}$$
 
 	```C++
 	sampleTimer.setOverflow(22000, HERTZ_FORMAT);
-	sampleTimer.ttachInterrupt(sampleISR);
+	sampleTimer.attachInterrupt(sampleISR);
 	sampleTimer.resume();
 	```
 	 
@@ -427,20 +427,20 @@ We will separate these two processes into different tasks by creating a thread t
 	vTaskDelayUntil( &xLastWakeTime, xFrequency );
 	```
 	 
-	This function call blocks execution of the thread until `xFrequency ticks` have happened since the last execution of the loop.
-	As an RTOS function, it places the thread into the waiting state and allows the CPU to do other tasks until it is time to run the function again.
+	This function call blocks execution of the thread until `xFrequency` ticks have happened since the last execution of the loop.
+	As a RTOS function, it places the thread into the waiting state and allows the CPU to do other tasks until it is time to run the function again.
 	When the required time has passed, `xLastWakeTime` is updated by the RTOS ready for the next iteration.
 	See the [API reference](https://www.freertos.org/vtaskdelayuntil.html) for more information about this function call.
 
 5.	Test your code.
 	It should behave as before.
 	You may have noticed another potential synchronisation bug with the `sysState` struct.
-	`sysState` cannot be treated as a simple atomic variable because it interacting with it may take multiple memory accesses, for example in the member functions of bitset.
+	`sysState` cannot be treated as a simple atomic variable because interacting with it may take multiple memory accesses, for example in the member functions of bitset.
 	We will solve the problem in the next section using a mutex.
 
 6.	The main loop is usually left empty in FreeRTOS systems.
 	Create another thread to run the display update task (name the function `displayUpdateTask()`) with a 100ms initiation interval.
-	Remove the original, polling-based rate control implemented with `if (millis() > next) {…}` or `while (millis() < next);` and replace it with an infinite loop and a call to `vTaskDelayUntil()`.
+	Remove the original, polling-based rate control implemented with `while (millis() < next);` and replace it with an infinite loop and a call to `vTaskDelayUntil()`.
 
 	Since 100ms is longer than 50ms, set the priority of the display update thread to 1 and the key scanning thread to 2 (higher priority).
 	Use a stack size of 256 words for `displayUpdateTask()`.
@@ -477,6 +477,4 @@ We will separate these two processes into different tasks by creating a thread t
 > Dynamic memory comes from a single pool (the heap), so it is more flexible than the per-thread allocation of stack memory.
 > Avoid allocating dynamic memory outside of the initialisation code.
 > In some industries dynamic allocation is banned due to its runtime uncertainty.
-> Raw `new` and `malloc` are discouraged in general programming due to the possibility of memory leaks, but that is not a concern if memory is allocated only during initialisation and never deallocated.
-
-	 
+> Raw `new` and `malloc` are discouraged in general C++ programming due to the possibility of memory leaks, but that is not a concern if memory is allocated only during initialisation and never deallocated.

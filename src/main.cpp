@@ -27,6 +27,7 @@
   const int JOYX_PIN = A1;
 
   //Output multiplexer bits
+  const int KNOB_MODE = 2;
   const int DEN_BIT = 3;
   const int DRST_BIT = 4;
   const int HKOW_BIT = 5;
@@ -73,6 +74,7 @@ void setup() {
   setOutMuxBit(DRST_BIT, HIGH);  //Release display logic reset
   u8g2.begin();
   setOutMuxBit(DEN_BIT, HIGH);  //Enable display power supply
+  setOutMuxBit(KNOB_MODE, HIGH);  //Read knobs through key matrix
 
   //Initialise UART
   Serial.begin(9600);
@@ -91,7 +93,7 @@ void loop() {
   //Update display
   u8g2.clearBuffer();         // clear the internal memory
   u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
-  u8g2.drawStr(2,10,"Helllo World!");  // write something to the internal memory
+  u8g2.drawStr(0,10,"Helllo World!");  // write something to the internal memory
   u8g2.setCursor(2,20);
   u8g2.print(count++);
   u8g2.sendBuffer();          // transfer internal memory to the display

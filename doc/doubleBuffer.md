@@ -102,7 +102,7 @@ If $L$ is too large then there could be a noticable delay between a user input a
 The double bufffer implementation here is lightweight but it makes some assumptions:
 1.	The ISR makes several access to global memory: the sample buffer, the `writeBuffer1` flag and the semaphore.
 	There is no attempt to keep them synchronised and we assume that there is no higher-priority task that could prempt this interrupt and access these variables.
-	For example, there is no possibility of the write thread acting on the change to `writeBuffer1` before the semaphore is given in the next line.
+	For example, we assume there is no possibility of the write thread acting on the change to `writeBuffer1` before the semaphore is given in the next line.
 2.	The `writeBuffer1` flag is atomic, but the generator thread uses it non-atomically to decide which buffer to write to.
 	There is a possibility of the flag changing between the test and the write to a sample buffer, so the flag doesn't fully protect against simultaneous access to the same buffer.
 	This could be resolved by placing the flag test and the buffer write in a critical section.

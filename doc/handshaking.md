@@ -42,14 +42,14 @@
   | ------ | ------------- |
   | 0      | Unimplemented |
   | 1      | Unimplemented |
-  | 2      | Unimplemented |
+  | 2      | [Knob read mode](v2knobs.md) (StackSynth V2 only) |
   | 3      | OLED PSU Enable |
   | 4      | OLED nReset     |
   | 5      | Handshake output west |
   | 6      | Handshake output east |
   
   The OLED controls should be left high after startup.
-  The starter code does this by leaving OUT_PIN high, which means the handshake outputs are enabled by default.
+  The starter code does this by leaving `OUT_PIN` high, which means the handshake outputs are enabled by default.
   
 ### Receiving a handshake signal
   The handshake inputs are connected to a FET that's placed in one node of the key scan matrix. For example:

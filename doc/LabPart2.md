@@ -10,8 +10,8 @@ This time we will develop the system further and complete the remaining core goa
 
 ### 1. Add a mutex
 Part 1 of the lab notes left a synchronisation bug.
-The struct `sysState` is a global object and it is accessed by both the main loop and `scanKeysTask()`.
-It cannot be accessed atomically because it requires multiple operations to read and write.
+The struct `sysState` is a global object and it is accessed by both `displayUpdateTask()` and `scanKeysTask()`.
+It cannot be accessed atomically because it requires multiple CPU instructions to read and write.
 Since all the accesses to the object are from threads, not interrupts, it can be protected by a mutex.
 
 1.	Add a handle for a FreeRTOS mutex to `sysState`, which can be used by different threads to access the mutex object:
@@ -44,7 +44,7 @@ Since all the accesses to the object are from threads, not interrupts, it can be
 	
 	```c++
 	xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-	… //Access sysStatehere
+	… //Access sysState here
 	xSemaphoreGive(sysState.mutex);
 	```
 	
@@ -144,7 +144,7 @@ Note that the rotation variable is only incremented or decremented when input A 
   > Normally you would connect incremental encoders directly to MCU pins so you can generate interrupts when the inputs change.
   > Unfortunately, there are not enough pins on the microcontroller module for this.
   > 
-  > To fix this problem, V2.1 of the synthesiser module contains an I<sup>2</sup>C GPIO expander device with interrrupt capability that can be used to read the knobs instead of the input matrix. As an extension, you can get a V2.1 module and follow the [guidance on using the GPIO expander](v2knobs.md).
+  > To fix this problem, V2.1 of the synthesiser module contains an I<sup>2</sup>C GPIO expander device with interrrupt capability that can be used to read the knobs instead of the input matrix. As an extension, you can use a V2.1 module and follow the [guidance on using the GPIO expander](v2knobs.md).
 
 4.	The knob can be used to implement a simple volume control.
 	First, add limits to your knob decoder so the maximum rotation can be 8 and the minimum can be 0.
@@ -174,7 +174,7 @@ Atomic access is appropriate since the variable is a single word, but you must e
 	-	Set upper and lower limits
 	-	Read the current rotation value
 
-	Make the class thread safe, meaning that all public methods behave as reenterant functions and they can be called from concurrent tasks without need needing additional synchronisation locks outside the member functions.
+	Make the class thread-safe, meaning that all public methods behave as reenterant functions and they can be called from concurrent tasks without need needing additional synchronisation locks outside the member functions. Functions that can be called from an interrupt should be interrupt-safe, meaning that they contain no blocking statements such as mutex locks.
 	
   > [!TIP]
   > Global variables and synchronisation in embedded code
@@ -354,16 +354,16 @@ Only some of the features of the hardware are exposed by this library.
 	```
 
 	Create a decode thread with a function `decodeTask` to process messages on the queue.
-	The thread will be initiated not by the tick counter, like before, but by the availability of data on the queue:
+	The thread will be initiated not by the tick counter, like before, but by the availability of data on the queue using `xQueueReceive()`:
 	
 	```c++
 	xQueueReceive(msgInQ, RX_Message, portMAX_DELAY);
 	```
 	
-	The call to `xQueueReceive()` will block and yield the CPU to other tasks until a message is available in the queue.
-	Place it in the infinite loop in your decode thread instead of `vTaskDelayUntil()`.
+	The call to `xQueueReceive()` will block and yield the CPU to other tasks until a message is available in the queue. When a message is available, the contents is copied to `RX_Message`.
+	Place the function call in the infinite loop in your decode thread instead of `vTaskDelayUntil()`.
 	Nothing else is needed in this thread function for now.
-	Remove the call to `CAN_RX()` from the display function and initialise the decode thread in setup.
+	Remove the call to `CAN_RX()` from the display function and initialise the decode thread in `setup()`.
 	
 	The call to `xQueueReceive()` is given the `RX_Message` array to hold the result.
 	Convert `RX_Message` to a global variable so it can be accessed in both the decode and display tasks.
@@ -408,7 +408,7 @@ Only some of the features of the hardware are exposed by this library.
 	xQueueSend( msgOutQ, TX_Message, portMAX_DELAY);
 	```
 
-	The transmit thread will use a semaphore to check when it can place a message in the outgoing mailbox. Declare a global handler for it:
+	The transmit thread will use a semaphore to check when it can place a message in the outgoing mailbox in the CAN hardware. Declare a global handler for it:
 	
 	```c++
 	SemaphoreHandle_t CAN_TX_Semaphore;
