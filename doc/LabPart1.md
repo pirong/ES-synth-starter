@@ -164,7 +164,8 @@ The keys and knobs on the keyboard module are connected to a key matrix, which a
 > |  | D5 | PB6 | Display I2C SCL |
 > |  | D10 | PA11 | CAN bus RXD |
 > |  | D2 | PA12 | CAN bus TXD |
-> | LED_BUILTIN | LED_BUILTIN | PB3 | LED LD3 |
+> | LED_BUILTIN | LED_BUILTIN | PB3 | User LED Green |
+> |  |    | PC15 | User LED Red (V2.x keyboard only) |
 > |  | D0 | PA10 | Knob change interrupt (V2.x keyboard only) |
 
 ### 3. Generate Sound
