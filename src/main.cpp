@@ -7,10 +7,12 @@
 #include <ES_CAN.h>
 #include <STM32FreeRTOS.h>
 
+#include "main.h"
+
 #define min(a,b) ((a) < (b) ? (a) : (b))
 #define max(a,b) ((a) > (b) ? (a) : (b))
 
-#define NUM_VOICES 8
+#define NUM_VOICES 4
 
 #define WAVE_SAW      0
 #define WAVE_SINE     1
@@ -23,35 +25,6 @@ std::atomic<uint8_t> currentWaveState = WAVE_SAW;
 
 //Constants
   const uint32_t interval = 100; //Display update interval
-
-//Pin definitions
-  //Row select and enable
-  const int RA0_PIN = D3;
-  const int RA1_PIN = D6;
-  const int RA2_PIN = D12;
-  const int REN_PIN = A5;
-
-  //Matrix input and output
-  const int C0_PIN = A2;
-  const int C1_PIN = D9;
-  const int C2_PIN = A6;
-  const int C3_PIN = D1;
-  const int OUT_PIN = D11;
-
-  //Audio analogue out
-  const int OUTL_PIN = A4;
-  const int OUTR_PIN = A3;
-
-  //Joystick analogue in
-  const int JOYY_PIN = A0;
-  const int JOYX_PIN = A1;
-
-  //Output multiplexer bits
-  const int KNOB_MODE = 2;
-  const int DEN_BIT = 3;
-  const int DRST_BIT = 4;
-  const int HKOW_BIT = 5;
-  const int HKOE_BIT = 6;
 
 //Display driver object
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
@@ -352,6 +325,12 @@ void displayUpdateTask(void * pvParameters) {
     u8g2.print(knob3.get(),DEC); 
     xSemaphoreGive(sysState.mutex);
 
+    u8g2.setCursor(15,20);
+    u8g2.print(device_count);
+    u8g2.print(' ');
+    u8g2.print(device_id[0], HEX);
+    u8g2.print(' ');
+    u8g2.print(device_position[0]);
     u8g2.setCursor(20,30);
 
     uint8_t localRXMessage[11] = {0};
@@ -493,7 +472,8 @@ void CAN_RX_ISR (void) {
 	uint8_t RX_Message_ISR[8];
 	uint32_t ID;
 	CAN_RX(ID, RX_Message_ISR);
-	xQueueSendFromISR(msgInQ, RX_Message_ISR, NULL);
+  if (ID == 0x123)
+	  xQueueSendFromISR(msgInQ, RX_Message_ISR, NULL);
 }
 
 //Function to set outputs using key matrix
@@ -512,7 +492,7 @@ void setup() {
   // put your setup code here, to run once:
   initStepSizes();
   initSineTable();
-
+  
   sampleTimer.setOverflow(22000, HERTZ_FORMAT);
   sampleTimer.attachInterrupt(sampleISR);
   sampleTimer.resume();
@@ -570,10 +550,13 @@ void setup() {
   msgOutQ = xQueueCreate(36,8);
 
   CAN_Init(true);
+  setCANFilter(0x122,0x7ff);
   setCANFilter(0x123,0x7ff);
   CAN_RegisterRX_ISR(CAN_RX_ISR);
   CAN_RegisterTX_ISR(CAN_TX_ISR);
   CAN_Start();
+
+  determinePosition();
 
   //Set pin directions
   pinMode(RA0_PIN, OUTPUT);
