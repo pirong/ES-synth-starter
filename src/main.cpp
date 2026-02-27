@@ -7,7 +7,9 @@
 #include <ES_CAN.h>
 #include <STM32FreeRTOS.h>
 
+#include "chorus.h"
 #include "main.h"
+#include "knob.h"
 
 #define min(a,b) ((a) < (b) ? (a) : (b))
 #define max(a,b) ((a) > (b) ? (a) : (b))
@@ -30,9 +32,6 @@ std::atomic<uint8_t> currentWaveState = WAVE_SAW;
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 
 HardwareTimer sampleTimer(TIM1);
-
-const float SAMPLE_RATE = 22000.0f;
-const float PHASE_RES = 4294967296.0f; // 2^32
 
 const int8_t semitoneOffsets[12] = {
     -9, -8, -7, -6,
@@ -83,54 +82,6 @@ std::bitset<4> readCols(){
   return result;
 }
 
-class Knob {
-public:
-    Knob(int8_t lower = 0, int8_t upper = 8)
-        : minLimit(lower), maxLimit(upper), rotation(0), prevState(0) {
-        mutex = xSemaphoreCreateMutex();
-    }
-
-    ~Knob() {
-        if (mutex) {
-            vSemaphoreDelete(mutex);
-        }
-    }
-
-    void update(uint8_t inputA, uint8_t inputB) {
-        uint8_t currState = (inputB << 1) | inputA;
-        int8_t change = 0;
-
-        if ((prevState == 0b00 && currState == 0b01) ||
-            (prevState == 0b11 && currState == 0b10)) {
-            change = 1;
-        }
-        else if ((prevState == 0b01 && currState == 0b00) ||
-                 (prevState == 0b10 && currState == 0b11)) {
-            change = -1;
-        }
-
-        xSemaphoreTake(mutex, portMAX_DELAY);
-        if (change != 0) {
-            rotation += change;
-            auto value = rotation.load(std::memory_order_relaxed);
-            rotation.store(max(minLimit, min(maxLimit, value)),
-               std::memory_order_relaxed);
-        }
-        prevState = currState;
-        xSemaphoreGive(mutex);
-    }
-
-    int8_t get() {
-        return rotation.load(std::memory_order_relaxed);
-    }
-
-private:
-    int8_t minLimit;
-    int8_t maxLimit;
-    std::atomic<int8_t> rotation;
-    uint8_t prevState;
-    SemaphoreHandle_t mutex;
-};
 Knob knob0(0, 8);
 Knob knob1(0, 8);
 Knob knob2(0, 8);
@@ -184,7 +135,7 @@ private:
     else if (abs(dx) > abs(dy))
       newDir = (dx > 0) ? WEST : EAST;
     else
-      newDir = (dy > 0) ? NORTH : SOUTH;
+      newDir = (dy > 0) ? SOUTH : NORTH;
 
     _dir.store(newDir, std::memory_order_relaxed);
   }
@@ -269,73 +220,175 @@ void displayUpdateTask(void * pvParameters) {
   while (true) {
     vTaskDelayUntil( &xLastWakeTime, xFrequency );
 
-    //Update display
-    u8g2.clearBuffer();                  // clear the internal memory
-    u8g2.setFont(u8g2_font_ncenB08_tr);  // choose a suitable font
+    // Main Menu State
+    const char* menuItems[4] = { "MENU", "WAVE", "CHOR", "TREM" };
+    static uint8_t selectedMenu = 0;
+    static uint8_t topMenuIndex = 0;     // Keeps track of the scrolling window
+    static bool showWaveMenu = false;    // Tracks if we are inside the WAVE options
+    static bool showChorusMenu = false;  // Tracks if we are inside the CHORUS options
 
-    u8g2.setCursor(0,0);
-
+    // Wave Sub-menu State
     const char* waveLabels[4] = { "SAW", "SIN", "TRI", "SQR" };
     static uint8_t selectedWave = 0;
+    
     Joystick::Direction dir = joystick.get();
     static Joystick::Direction lastDir = Joystick::CENTER;
 
     // Only update selection when direction changes
     if (dir != lastDir) {
-        if (dir == Joystick::EAST) {                // move right
-            selectedWave = (selectedWave + 1) % 4;
-        } else if (dir == Joystick::WEST) {         // move left
-            selectedWave = (selectedWave + 3) % 4;  // wrap around
+        if (showWaveMenu) {
+            // Sub-menu navigation
+            if (dir == Joystick::EAST) {
+                if (selectedWave == 3) {
+                    showWaveMenu = false; // Exit sub-menu if we wrap right from the last item
+                    selectedWave = 0;  
+                } else {
+                  selectedWave = (selectedWave + 1) % 4;
+                }
+            } else if (dir == Joystick::WEST) {
+                if (selectedWave == 0) {
+                    showWaveMenu = false; // Exit sub-menu if we wrap left from the first item
+                } else {
+                  selectedWave = (selectedWave + 3) % 4; // Wrap left
+                }
+            } else if (dir == Joystick::NORTH) {
+                showWaveMenu = false;                  // Exit sub-menu
+                selectedMenu = (selectedMenu + 3) % 4; // Move up in main menu
+            } else if (dir == Joystick::SOUTH) {
+                showWaveMenu = false;                  // Exit sub-menu
+                selectedMenu = (selectedMenu + 1) % 4; // Move down in main menu
+            }
+        } else if (showChorusMenu) {
+            if (dir == Joystick::EAST || dir == Joystick::WEST) {
+              showChorusMenu = false; // Exit CHORUS sub-menu on left/right input
+            }
+        } else {
+            // Main menu navigation
+            if (dir == Joystick::SOUTH) {
+                selectedMenu = (selectedMenu + 1) % 4;
+            } else if (dir == Joystick::NORTH) {
+                selectedMenu = (selectedMenu + 3) % 4;
+            } else if (dir == Joystick::EAST && selectedMenu == 1) { 
+                showWaveMenu = true; // Enter WAVE sub-menu (Index 1)
+            } else if (dir == Joystick::EAST && selectedMenu == 2) { 
+                showChorusMenu = true; // Enter CHORUS sub-menu (Index 2)
+            }
         }
     }
     lastDir = dir;
 
-    // Display waveforms in a single line
+    // Update scrolling window (max 3 items visible due to 30px height constraint)
+    if (selectedMenu < topMenuIndex) {
+        topMenuIndex = selectedMenu;
+    } else if (selectedMenu >= topMenuIndex + 3) {
+        topMenuIndex = selectedMenu - 2;
+    }
+
+    // --- DRAWING ---
+    uint8_t h = 10; // Approximate font height per your 10-bit requirement
+
+    // 1. Draw Main Menu (Left Column)
     u8g2.setFont(u8g2_font_ncenB08_tr);
-    uint8_t x = 0;           // start X
-    uint8_t y = 10;          // Y position
-    uint8_t spacing = 6;     // pixels between words
+    u8g2.setFontMode(1); // Force transparent font mode to prevent background artifacts
 
-    for (uint8_t i = 0; i < 4; i++) {
+    for (uint8_t i = 0; i < 3; i++) {
+        // Use modulo to seamlessly wrap the menu visually
+        uint8_t itemIndex = (topMenuIndex + i) % 4; 
+        
+        uint8_t y = (i + 1) * 10; // Positions: 10, 20, 30
+        uint8_t w = u8g2.getStrWidth(menuItems[itemIndex]);
 
-        uint8_t w = u8g2.getStrWidth(waveLabels[i]);
-
-        if (i == selectedWave) {
-            // highlight background
-            uint8_t h = 10;  // approximate font height
-            u8g2.drawBox(x, y - h + 2, w, h);
-            u8g2.setDrawColor(0);  // text color black
+        if (itemIndex == selectedMenu) {
+            // Highlight background
+            u8g2.setDrawColor(1);
+            u8g2.drawBox(0, y - h + 2, w + 4, h);
+            u8g2.setDrawColor(0);
         } else {
-            u8g2.setDrawColor(1);  // normal white text
+            // Unselect background
+            u8g2.setDrawColor(0);
+            u8g2.drawBox(0, y - h + 2, w + 4, h);
+            u8g2.setDrawColor(1);
         }
 
-        u8g2.setCursor(x, y);
-        u8g2.print(waveLabels[i]);
+        u8g2.setCursor(1, y+1);            // 1px padding
+        u8g2.print(menuItems[itemIndex]);
+    }
+    
+    // Reset draw color back to white for the right-side WAVE menu
+    u8g2.setDrawColor(1);
 
-        // reset draw color for next
+    // Draw Wave Sub-menu
+    if (showWaveMenu) {
+        uint8_t y = 10;
+        uint8_t x = 40;        // Start X offset to the right of the main menu
+        uint8_t spacing = 6;   // Pixels between words
+
+        for (uint8_t i = 0; i < 4; i++) {
+            uint8_t w = u8g2.getStrWidth(waveLabels[i]);
+
+            if (i == selectedWave) {
+                // Highlight background
+                u8g2.setDrawColor(1);
+                u8g2.drawBox(x, y - h + 2, w + 2, h);
+                u8g2.setDrawColor(0);  
+            } else {
+                // Deselect background
+                u8g2.setDrawColor(0);
+                u8g2.drawBox(x, y - h + 2, w + 2, h);
+                u8g2.setDrawColor(1);  
+            }
+
+            u8g2.setCursor(x + 1, y);
+            u8g2.print(waveLabels[i]);
+            u8g2.setDrawColor(1); // Reset draw color for next
+
+            x += w + spacing;  // Move to next word
+        }
+    } else if (showChorusMenu) {
+      
+        u8g2.setDrawColor(0);
+        u8g2.drawBox(40, 0, 98, 32); // Clear right side of display
         u8g2.setDrawColor(1);
 
-        x += w + spacing;  // move to next word
+        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+        float localChorusRate = chorusRate.load(std::memory_order_relaxed);
+        float localChorusDepth = chorusDepth.load(std::memory_order_relaxed);
+        xSemaphoreGive(sysState.mutex); 
+
+        u8g2.setCursor(45,10);
+        u8g2.print("RATE:");
+        u8g2.print(localChorusRate,2); 
+
+        u8g2.setCursor(45,20);
+        u8g2.print("DEPTH:");
+        u8g2.print(localChorusDepth,2); 
+
+    } else {
+        u8g2.setDrawColor(0);
+        u8g2.drawBox(40, 0, 98, 32); // Clear right side of display
+        u8g2.setDrawColor(1); // Reset draw color
     }
 
     currentWaveState.store(selectedWave, std::memory_order_release);
+    
+    /*
 
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-    u8g2.setCursor(0,20);
+    u8g2.setCursor(30,20);
     u8g2.print(knob3.get(),DEC); 
     xSemaphoreGive(sysState.mutex);
 
-    u8g2.setCursor(15,20);
+    u8g2.setCursor(40,20);
     u8g2.print(device_count);
     u8g2.print(' ');
     u8g2.print(device_id[0], HEX);
     u8g2.print(' ');
     u8g2.print(device_position[0]);
-    u8g2.setCursor(20,30);
 
-    uint8_t localRXMessage[11] = {0};
+    u8g2.setCursor(40,30);
+    uint8_t localRXMessage[8] = {0};
     xSemaphoreTake(sysState.rx_message_mutex, portMAX_DELAY);
-    memcpy(localRXMessage, sysState.RX_Message, 11);
+    memcpy(localRXMessage, sysState.RX_Message, 8);
     xSemaphoreGive(sysState.rx_message_mutex);
 
     if (localRXMessage[0] == 'R'){
@@ -354,7 +407,7 @@ void displayUpdateTask(void * pvParameters) {
         }
       }
     }
-
+    */
     u8g2.sendBuffer();                   // transfer internal memory to the display
 
     digitalToggle(LED_BUILTIN);          // Toggle LED
@@ -461,7 +514,8 @@ void sampleISR() {
   }
 
   mixedSound = mixedSound >> (8 - knob3.get());
-  analogWrite(OUTR_PIN, mixedSound + 128);
+
+  analogWrite(OUTR_PIN, chorusWave(mixedSound) + 128);
 }
 
 void CAN_TX_ISR (void) {
