@@ -10,6 +10,7 @@
 #include "chorus.h"
 #include "main.h"
 #include "knob.h"
+#include "tremelo.h"
 
 #define min(a,b) ((a) < (b) ? (a) : (b))
 #define max(a,b) ((a) > (b) ? (a) : (b))
@@ -226,6 +227,7 @@ void displayUpdateTask(void * pvParameters) {
     static uint8_t topMenuIndex = 0;     // Keeps track of the scrolling window
     static bool showWaveMenu = false;    // Tracks if we are inside the WAVE options
     static bool showChorusMenu = false;  // Tracks if we are inside the CHORUS options
+    static bool showTremeloMenu = false; // Tracks if we are inside the TREMELO options
 
     // Wave Sub-menu State
     const char* waveLabels[4] = { "SAW", "SIN", "TRI", "SQR" };
@@ -262,6 +264,10 @@ void displayUpdateTask(void * pvParameters) {
             if (dir == Joystick::EAST || dir == Joystick::WEST) {
               showChorusMenu = false; // Exit CHORUS sub-menu on left/right input
             }
+        } else if (showTremeloMenu) {
+            if (dir == Joystick::EAST || dir == Joystick::WEST) {
+              showTremeloMenu = false; // Exit TREMELO sub-menu on left/right input
+            }
         } else {
             // Main menu navigation
             if (dir == Joystick::SOUTH) {
@@ -272,6 +278,8 @@ void displayUpdateTask(void * pvParameters) {
                 showWaveMenu = true; // Enter WAVE sub-menu (Index 1)
             } else if (dir == Joystick::EAST && selectedMenu == 2) { 
                 showChorusMenu = true; // Enter CHORUS sub-menu (Index 2)
+            } else if (dir == Joystick::EAST && selectedMenu == 3) { 
+                showTremeloMenu = true; // Enter TREMELO sub-menu (Index 3) 
             }
         }
     }
@@ -350,18 +358,51 @@ void displayUpdateTask(void * pvParameters) {
         u8g2.drawBox(40, 0, 98, 32); // Clear right side of display
         u8g2.setDrawColor(1);
 
+        // Precompute chorus parameters based on knob positions
+        // Rate: 0–4 Hz (Convert Hz to 32-bit phase increment)
+        // Depth: 0-16 samples
+        uint8_t localKnob1 = knob1.get();
+        uint8_t localKnob2 = knob2.get();
+        float rateHz = localKnob1 / 2;
+        
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-        float localChorusRate = chorusRate.load(std::memory_order_relaxed);
-        float localChorusDepth = chorusDepth.load(std::memory_order_relaxed);
+        chorusStep.store((rateHz * 4294967296.0f) / SAMPLE_RATE);
+        chorusDepth.store(localKnob2 * 2);
         xSemaphoreGive(sysState.mutex); 
-
+        
         u8g2.setCursor(45,10);
         u8g2.print("RATE:");
-        u8g2.print(localChorusRate,2); 
+        u8g2.print(rateHz,2); 
 
         u8g2.setCursor(45,20);
         u8g2.print("DEPTH:");
-        u8g2.print(localChorusDepth,2); 
+        u8g2.print(int(localKnob2 * 2),DEC); 
+
+    } else if (showTremeloMenu) {
+      
+        u8g2.setDrawColor(0);
+        u8g2.drawBox(40, 0, 98, 32); // Clear right side of display
+        u8g2.setDrawColor(1);
+
+        // Precompute tremolo parameters based on knob positions
+        // Rate: 0–16 Hz (Convert Hz to 32-bit phase increment)
+        // Depth: 0-16 (0-100% wet)
+        uint8_t localKnob1 = knob1.get();
+        uint8_t localKnob2 = knob2.get();
+        float rateHz = localKnob1 * 2;
+        
+        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+        tremoloStep.store((rateHz * 4294967296.0f) / SAMPLE_RATE);
+        tremoloDepth.store(localKnob2 * 8);
+        xSemaphoreGive(sysState.mutex); 
+        
+        u8g2.setCursor(45,10);
+        u8g2.print("RATE:");
+        u8g2.print(rateHz,2); 
+
+        u8g2.setCursor(45,20);
+        u8g2.print("DEPTH:");
+        u8g2.print(int(localKnob2 * 8),DEC); 
 
     } else {
         u8g2.setDrawColor(0);
@@ -515,7 +556,7 @@ void sampleISR() {
 
   mixedSound = mixedSound >> (8 - knob3.get());
 
-  analogWrite(OUTR_PIN, chorusWave(mixedSound) + 128);
+  analogWrite(OUTR_PIN, chorusWave(tremoloWave(mixedSound) + 128));
 }
 
 void CAN_TX_ISR (void) {

@@ -3,9 +3,9 @@
 
 #include <atomic>
 
-extern std::atomic<float> chorusRate;
-extern std::atomic<float> chorusDepth;
+extern std::atomic<uint32_t> chorusStep;
+extern std::atomic<uint8_t> chorusDepth;
 
-int32_t chorusWave(int16_t drySample);
+int32_t chorusWave(int32_t drySample);
 
 #endif

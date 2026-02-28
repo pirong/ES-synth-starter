@@ -6,48 +6,49 @@
 #define CHORUS_MAX_DELAY_MS 25
 #define CHORUS_BUFFER_SIZE int((SAMPLE_RATE * CHORUS_MAX_DELAY_MS) / 1000)
 
-int16_t chorusBuffer[CHORUS_BUFFER_SIZE];
+int32_t chorusBuffer[CHORUS_BUFFER_SIZE];
 uint32_t chorusWriteIndex = 0;
 
 extern Knob knob1;
 extern Knob knob2;
+extern uint8_t sineTable[256];
 
-// LFO
-float chorusPhase = 0.0f;
-std::atomic<float> chorusRate;       // Hz
-std::atomic<float> chorusDepth;      // samples
-float chorusBaseDelay = 25.0f;  // samples (~1.1ms at 22k)
+std::atomic<uint32_t> chorusStep;       // phase increment
+std::atomic<uint8_t> chorusDepth;      // samples
 
-inline int32_t chorusWave(int16_t drySample) {
+static uint32_t chorusPhase = 0;
+uint8_t  chorusBaseDelay = 25;
 
-  // --- LFO ---
-  float localChorusRate = knob1.get() / 2.0f;  // Between 0-4 Hz
-  chorusRate = localChorusRate;
+int32_t chorusWave(int32_t drySample) {
 
-  float localChorusDepth = knob2.get() * 2.0f; // Max depth of 10 samples
-  chorusDepth = localChorusDepth;
-  
-  chorusPhase += (2.0f * PI * chorusRate) / SAMPLE_RATE;
-  if (chorusPhase > 2.0f * PI)
-    chorusPhase -= 2.0f * PI;
+    // ---- LFO ----
+    chorusPhase += chorusStep.load(std::memory_order_relaxed);
 
-  float lfo = sinf(chorusPhase);  // -1..1
-  float modulatedDelay = chorusBaseDelay + (lfo * chorusDepth);
+    // Top 8 bits select sine index
+    uint8_t index = chorusPhase >> 24;
 
-  // Read position
-  int32_t readIndex = chorusWriteIndex - (int32_t)modulatedDelay;
-  if (readIndex < 0)
-    readIndex += CHORUS_BUFFER_SIZE;
+    // 0–255
+    uint8_t lfo = sineTable[index];
 
-  int16_t delayedSample = chorusBuffer[readIndex];
+    // Convert to signed -128..127
+    int16_t lfoSigned = (int16_t)lfo - 128;
 
-  // Write current sample
-  chorusBuffer[chorusWriteIndex] = drySample;
+    // Scale by depth (samples)
+    int32_t modulatedDelay = chorusBaseDelay + ((int32_t)lfoSigned * chorusDepth.load(std::memory_order_relaxed) >> 7);
 
-  chorusWriteIndex++;
-  if (chorusWriteIndex >= CHORUS_BUFFER_SIZE)
-    chorusWriteIndex = 0;
+    // ---- Delay read ----
+    int32_t readIndex = chorusWriteIndex - modulatedDelay;
+    if (readIndex < 0)
+        readIndex += CHORUS_BUFFER_SIZE;
 
-  // Mix 50/50
-  return (drySample >> 1) + (delayedSample >> 1);
+    int32_t delayedSample = chorusBuffer[readIndex];
+
+    // ---- Write ----
+    chorusBuffer[chorusWriteIndex] = drySample;
+
+    if (++chorusWriteIndex >= CHORUS_BUFFER_SIZE)
+        chorusWriteIndex = 0;
+
+    // 50/50 mix
+    return (drySample + delayedSample) >> 1;
 }
