@@ -34,7 +34,7 @@
   const int HKOE_BIT = 6;
 
 
-const float SAMPLE_RATE = 22000.0f;
+const float SAMPLE_RATE = 256000.0f;
 const float PHASE_RES = 4294967296.0f; // 2^32
 
 void setRow(uint8_t rowIdx);

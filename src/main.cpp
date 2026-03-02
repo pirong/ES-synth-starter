@@ -13,6 +13,9 @@
 #include "knob.h"
 #include "tremelo.h"
 
+#include "stm32l4xx.h"
+#include "stm32l4xx_hal.h"
+
 #define min(a,b) ((a) < (b) ? (a) : (b))
 #define max(a,b) ((a) > (b) ? (a) : (b))
 
@@ -91,13 +94,17 @@ Knob knob3(0, 8);
 
 Joystick joystick(JOYX_PIN, JOYY_PIN);
 
+// DAC and DMA handles
+DAC_HandleTypeDef hdac1;
+DMA_HandleTypeDef hdma_dac1_ch1;
+TIM_HandleTypeDef htim6;
+
 struct {
   std::bitset<32> inputs;
   uint8_t RX_Message[11];
   SemaphoreHandle_t mutex;
   SemaphoreHandle_t rx_message_mutex;
   SemaphoreHandle_t tx_message_mutex;
-  SemaphoreHandle_t buffer_semaphore;
 } sysState;
 
 QueueHandle_t msgInQ;
@@ -434,53 +441,28 @@ inline int32_t renderWave(uint32_t phase, uint8_t wavetype) {
   return 0;
 }
 
-#define SAMPLE_BUFFER_SIZE 128
-uint8_t sampleBuffer0[SAMPLE_BUFFER_SIZE/2];
-uint8_t sampleBuffer1[SAMPLE_BUFFER_SIZE/2];
-volatile bool writeBuffer1 = false;
-
-void sampleISR() {
-  static uint32_t readCtr = 0;
-
-  if (readCtr == SAMPLE_BUFFER_SIZE/2) {
-    readCtr = 0;
-    writeBuffer1 = !writeBuffer1;
-    xSemaphoreGiveFromISR(sysState.buffer_semaphore, NULL);
-  }
-    
-  if (writeBuffer1)
-    analogWrite(OUTR_PIN, sampleBuffer0[readCtr++]);
-  else
-    analogWrite(OUTR_PIN, sampleBuffer1[readCtr++]);
-}
-
-void generateWaveTask(void * pvParameters) {
-  const TickType_t xFrequency = 10/portTICK_PERIOD_MS;
-  TickType_t xLastWakeTime = xTaskGetTickCount();
-
-  while (true) {
-    xSemaphoreTake(sysState.buffer_semaphore, portMAX_DELAY);
-
+uint16_t sampleBuffer[256];
+static inline uint16_t generateOneSample()
+{
     static uint32_t phaseAcc[NUM_VOICES];
     int32_t mixedSound = 0;
     uint8_t localCurrentWaveState = currentWaveState.load(std::memory_order_acquire);
 
-	  for (uint32_t writeCtr = 0; writeCtr < SAMPLE_BUFFER_SIZE/2; writeCtr++) {
-
-      for (int i = 0; i < NUM_VOICES; i++) {
+    // Phase accumulators & mixing
+    for (int i = 0; i < NUM_VOICES; i++) {
         if (currentStepSize[i]) {
-          phaseAcc[i] += currentStepSize[i];
-          mixedSound += renderWave(phaseAcc[i], localCurrentWaveState);
+            phaseAcc[i] += currentStepSize[i];
+            mixedSound += renderWave(phaseAcc[i], localCurrentWaveState);
         }
-      }
+    }
 
-      // Divide sound across voices equally
-      mixedSound = mixedSound / NUM_VOICES;
+    // Average across voices
+    mixedSound = mixedSound / NUM_VOICES;
 
-      // Apply low-pass filter ONLY for sine wave
-      static float prevFiltered = 0.0f;
-      if (localCurrentWaveState == WAVE_SINE) {
-        // Convert to float -1.0 .. 1.0 for filtering
+    // Low-pass filter ONLY for sine wave
+    static float prevFiltered = 0.0f;
+    if (localCurrentWaveState == WAVE_SINE) {
+        // Convert to float -1.0.. 1.0 for filtering
         float normalized = ((float)mixedSound / 128.0f) - 1.0f;
 
         // One-pole IIR filter
@@ -488,62 +470,32 @@ void generateWaveTask(void * pvParameters) {
         float filtered = prevFiltered + alpha * (normalized - prevFiltered);
         prevFiltered = filtered;
 
-        // Convert back to int for PWM
+        // Convert back to int for “PWM-ish” scaling
         mixedSound = (int32_t)((filtered + 1.0f) * 128.0f);
 
         mixedSound = mixedSound << SINE_FACTOR;
-      }
-
-      mixedSound = mixedSound >> (8 - knob3.get());
-
-      uint32_t Vout = chorusWave(tremoloWave(mixedSound));
-
-      if (writeBuffer1)
-        sampleBuffer1[writeCtr] = Vout + 128;
-      else
-        sampleBuffer0[writeCtr] = Vout + 128;
     }
-  }
+
+    mixedSound = mixedSound >> (8 - knob3.get());
+
+    // Apply chorus + tremolo
+    mixedSound = chorusWave(tremoloWave(mixedSound) + 128);
+
+    // Apply volume
+    mixedSound = mixedSound << 4;
+
+    int32_t dacVal = mixedSound + 2048;  // shift to positive
+    if (dacVal < 0)       dacVal = 0;
+    if (dacVal > 4095)    dacVal = 4095;
+
+    return (uint16_t)dacVal;
 }
 
-/*
-void sampleISR() {
-  static uint32_t phaseAcc[NUM_VOICES];
-  int32_t mixedSound = 0;
-  uint8_t localCurrentWaveState = currentWaveState.load(std::memory_order_acquire);
-
-  for (int i = 0; i < NUM_VOICES; i++) {
-    if (currentStepSize[i]) {
-      phaseAcc[i] += currentStepSize[i];
-      mixedSound += renderWave(phaseAcc[i], localCurrentWaveState);
+void fillHalfBuffer(uint16_t* dst, size_t count){
+    for (int i = 0; i < count; i++) {
+        dst[i] = generateOneSample();
     }
-  }
-
-  // Divide sound across voices equally
-  mixedSound = mixedSound / NUM_VOICES;
-
-  // Apply low-pass filter ONLY for sine wave
-  static float prevFiltered = 0.0f;
-  if (localCurrentWaveState == WAVE_SINE) {
-    // Convert to float -1.0 .. 1.0 for filtering
-    float normalized = ((float)mixedSound / 128.0f) - 1.0f;
-
-    // One-pole IIR filter
-    const float alpha = 0.05f;  // adjust for cutoff frequency
-    float filtered = prevFiltered + alpha * (normalized - prevFiltered);
-    prevFiltered = filtered;
-
-    // Convert back to int for PWM
-    mixedSound = (int32_t)((filtered + 1.0f) * 128.0f);
-
-    mixedSound = mixedSound << SINE_FACTOR;
-  }
-
-  mixedSound = mixedSound >> (8 - knob3.get());
-
-  analogWrite(OUTR_PIN, chorusWave(tremoloWave(mixedSound) + 128));
 }
-*/
 
 void CAN_TX_ISR (void) {
 	xSemaphoreGiveFromISR(sysState.tx_message_mutex, NULL);
@@ -569,21 +521,141 @@ void setOutMuxBit(const uint8_t bitIdx, const bool value) {
       digitalWrite(REN_PIN,LOW);
 }
 
+#define APB1_TIMER_CLK  80000000UL
+
+extern DAC_HandleTypeDef hdac1;
+
+extern "C" void DMA1_Channel3_IRQHandler(void)
+{
+    HAL_DMA_IRQHandler(hdac1.DMA_Handle1);
+}
+
+SemaphoreHandle_t xDacDmaHalfSem;
+SemaphoreHandle_t xDacDmaFullSem;
+
+void HAL_DAC_ConvHalfCpltCallbackCh1(DAC_HandleTypeDef *hdac){
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    if (hdac->Instance == DAC1){
+        xSemaphoreGiveFromISR(xDacDmaHalfSem, &xHigherPriorityTaskWoken);
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    }
+}
+
+void HAL_DAC_ConvCpltCallbackCh1(DAC_HandleTypeDef *hdac){
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    if (hdac->Instance == DAC1) {
+        xSemaphoreGiveFromISR(xDacDmaFullSem, &xHigherPriorityTaskWoken);
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    }
+}
+
+#define DAC_HALF_SIZE 128
+void DacWaveGenTask(void *argument) {
+    while (true){
+        if (xSemaphoreTake(xDacDmaHalfSem, 0) == pdTRUE)
+          fillHalfBuffer(&sampleBuffer[0], DAC_HALF_SIZE);
+
+        if (xSemaphoreTake(xDacDmaFullSem, portMAX_DELAY) == pdTRUE)
+            fillHalfBuffer(&sampleBuffer[DAC_HALF_SIZE], DAC_HALF_SIZE);
+    }
+}
+
+void TIM6_Init() {
+  __HAL_RCC_TIM6_CLK_ENABLE();
+
+  uint32_t period = (APB1_TIMER_CLK / SAMPLE_RATE) - 1;
+
+  htim6.Instance               = TIM6;
+  htim6.Init.Prescaler         = 0;           // No prescaler - full resolution
+  htim6.Init.CounterMode       = TIM_COUNTERMODE_UP;
+  htim6.Init.Period            = period;       // Overflow at fs
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  HAL_TIM_Base_Init(&htim6);
+
+  // Route timer update event to TRGO so DAC can use it as trigger
+  TIM_MasterConfigTypeDef master = {};
+  master.MasterOutputTrigger = TIM_TRGO_UPDATE;
+  master.MasterSlaveMode     = TIM_MASTERSLAVEMODE_DISABLE;
+  HAL_TIMEx_MasterConfigSynchronization(&htim6, &master);
+}
+
+void DAC_DMA_Init() {
+  // --- Enable Clocks ---
+  __HAL_RCC_DAC1_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  // --- Configure PA4 as analog (DAC1_OUT1 = A3 on most STM32L4 boards) ---
+  GPIO_InitTypeDef GPIO_InitStruct = {};
+  GPIO_InitStruct.Pin  = GPIO_PIN_4;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  // --- Configure TIM6 as DAC trigger ---
+  // Target: 256 samples * desired_freq Hz
+  // Example: 1kHz sine = 256kHz timer trigger
+  // APB1 timer clock is typically 80MHz on STM32L4
+  __HAL_RCC_TIM6_CLK_ENABLE();
+  htim6.Instance = TIM6;
+  htim6.Init.Prescaler     = 0;          // No prescaler
+  htim6.Init.CounterMode   = TIM_COUNTERMODE_UP;
+  htim6.Init.Period        = 312 - 1;    // 80MHz / 312 ≈ 256kHz → 1kHz sine
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  HAL_TIM_Base_Init(&htim6);
+
+  TIM_MasterConfigTypeDef sMasterConfig = {};
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
+  sMasterConfig.MasterSlaveMode     = TIM_MASTERSLAVEMODE_DISABLE;
+  HAL_TIMEx_MasterConfigSynchronization(&htim6, &sMasterConfig);
+
+  // --- Configure DMA1 Channel 3 for DAC1_CH1 ---
+  hdma_dac1_ch1.Instance                 = DMA1_Channel3;
+  hdma_dac1_ch1.Init.Request             = DMA_REQUEST_6;   // DAC1_CH1 request on DMA1_CH3
+  hdma_dac1_ch1.Init.Direction           = DMA_MEMORY_TO_PERIPH;
+  hdma_dac1_ch1.Init.PeriphInc           = DMA_PINC_DISABLE;
+  hdma_dac1_ch1.Init.MemInc              = DMA_MINC_ENABLE;
+  hdma_dac1_ch1.Init.PeriphDataAlignment = DMA_PDATAALIGN_HALFWORD;
+  hdma_dac1_ch1.Init.MemDataAlignment    = DMA_MDATAALIGN_HALFWORD;
+  hdma_dac1_ch1.Init.Mode                = DMA_CIRCULAR;    // Loop forever
+  hdma_dac1_ch1.Init.Priority            = DMA_PRIORITY_HIGH;
+  HAL_DMA_Init(&hdma_dac1_ch1);
+
+  // Link DMA to DAC handle
+  __HAL_LINKDMA(&hdac1, DMA_Handle1, hdma_dac1_ch1);
+
+  // --- Configure DAC Channel 1 ---
+  hdac1.Instance = DAC1;
+  HAL_DAC_Init(&hdac1);
+
+  DAC_ChannelConfTypeDef sConfig = {};
+  sConfig.DAC_SampleAndHold      = DAC_SAMPLEANDHOLD_DISABLE;
+  sConfig.DAC_Trigger            = DAC_TRIGGER_T6_TRGO;     // Triggered by TIM6
+  sConfig.DAC_OutputBuffer       = DAC_OUTPUTBUFFER_ENABLE;
+  sConfig.DAC_ConnectOnChipPeripheral = DAC_CHIPCONNECT_DISABLE;
+  HAL_DAC_ConfigChannel(&hdac1, &sConfig, DAC_CHANNEL_1);
+
+  // Enable interrupt in NVIC for DMA1 Channel 3 (DAC1_CH1)
+  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 5, 0);   // priority as needed
+  HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
+}
+
 void setup() {
   // put your setup code here, to run once:
   initStepSizes();
   initSineTable();
-  
+
   sampleTimer.setOverflow(22000, HERTZ_FORMAT);
-  sampleTimer.attachInterrupt(sampleISR);
+  // sampleTimer.attachInterrupt(sampleISR);
   sampleTimer.resume();
 
   sysState.mutex = xSemaphoreCreateMutex();
   sysState.rx_message_mutex = xSemaphoreCreateMutex();
   sysState.tx_message_mutex = xSemaphoreCreateCounting(3,3);
-  sysState.buffer_semaphore = xSemaphoreCreateBinary();
-  xSemaphoreGive(sysState.buffer_semaphore);
 
+  xDacDmaHalfSem = xSemaphoreCreateBinary();
+  xDacDmaFullSem = xSemaphoreCreateBinary();
+  
   TaskHandle_t scanKeysHandle = NULL;
     xTaskCreate(
     scanKeysTask,		    /* Function that implements the task */
@@ -629,14 +701,14 @@ void setup() {
     1,			           
     &transmitHandle );
 
-  TaskHandle_t generateWaveHandle = NULL;
+  TaskHandle_t dacWaveGenHandle = NULL;
     xTaskCreate(
-    generateWaveTask,		    
-    "generateWave",
-    64,      		    
+    DacWaveGenTask,		    
+    "dacWaveGen",
+    256,      		    
     NULL,			       
-    1,			           
-    &generateWaveHandle );
+    2,			           
+    &dacWaveGenHandle );
 
   msgInQ = xQueueCreate(36,8);
   msgOutQ = xQueueCreate(36,8);
@@ -678,6 +750,20 @@ void setup() {
   //Initialise UART
   Serial.begin(9600);
   Serial.println("Hello World");
+
+  TIM6_Init();
+  DAC_DMA_Init();
+
+  // Start DMA before timer so first trigger has data ready
+  HAL_StatusTypeDef status = HAL_DAC_Start_DMA(
+    &hdac1, DAC_CHANNEL_1,
+    (uint32_t*)sampleBuffer,
+    256,
+    DAC_ALIGN_12B_R
+  );
+
+  // Start timer last - this begins triggering the DAC
+  HAL_TIM_Base_Start(&htim6);
 
   vTaskStartScheduler();
 }
