@@ -8,6 +8,7 @@
 #include <STM32FreeRTOS.h>
 
 #include "chorus.h"
+#include "joystick.h"
 #include "main.h"
 #include "knob.h"
 #include "tremelo.h"
@@ -88,59 +89,6 @@ Knob knob1(0, 8);
 Knob knob2(0, 8);
 Knob knob3(0, 8);
 
-class Joystick {
-public:
-
-  enum Direction {
-    CENTER, NORTH, SOUTH, EAST, WEST
-  };
-
-  Joystick(uint8_t xPin, uint8_t yPin)
-    : _xPin(xPin), _yPin(yPin) {}
-
-  void update(uint8_t pressed) {
-
-    int x = analogRead(_xPin);
-    int y = analogRead(_yPin);
-
-    _pressed.store(pressed, std::memory_order_relaxed);
-
-    determineDirection(x, y);
-  }
-
-  Direction get() const {
-    return _dir.load(std::memory_order_relaxed);
-  }
-
-  bool pressed() const {
-    return _pressed.load(std::memory_order_relaxed);
-  }
-
-private:
-  uint8_t _xPin, _yPin;
-
-  std::atomic<bool> _pressed{false};
-  std::atomic<Direction> _dir{CENTER};
-
-  const int DEADZONE = 100;
-
-  void determineDirection(int x, int y) {
-
-    int dx = x - 512;
-    int dy = y - 512;
-
-    Direction newDir;
-
-    if (abs(dx) < DEADZONE && abs(dy) < DEADZONE)
-      newDir = CENTER;
-    else if (abs(dx) > abs(dy))
-      newDir = (dx > 0) ? WEST : EAST;
-    else
-      newDir = (dy > 0) ? SOUTH : NORTH;
-
-    _dir.store(newDir, std::memory_order_relaxed);
-  }
-};
 Joystick joystick(JOYX_PIN, JOYY_PIN);
 
 struct {
@@ -149,6 +97,7 @@ struct {
   SemaphoreHandle_t mutex;
   SemaphoreHandle_t rx_message_mutex;
   SemaphoreHandle_t tx_message_mutex;
+  SemaphoreHandle_t buffer_semaphore;
 } sysState;
 
 QueueHandle_t msgInQ;
@@ -412,43 +361,6 @@ void displayUpdateTask(void * pvParameters) {
 
     currentWaveState.store(selectedWave, std::memory_order_release);
     
-    /*
-
-    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-    u8g2.setCursor(30,20);
-    u8g2.print(knob3.get(),DEC); 
-    xSemaphoreGive(sysState.mutex);
-
-    u8g2.setCursor(40,20);
-    u8g2.print(device_count);
-    u8g2.print(' ');
-    u8g2.print(device_id[0], HEX);
-    u8g2.print(' ');
-    u8g2.print(device_position[0]);
-
-    u8g2.setCursor(40,30);
-    uint8_t localRXMessage[8] = {0};
-    xSemaphoreTake(sysState.rx_message_mutex, portMAX_DELAY);
-    memcpy(localRXMessage, sysState.RX_Message, 8);
-    xSemaphoreGive(sysState.rx_message_mutex);
-
-    if (localRXMessage[0] == 'R'){
-      u8g2.print('R');
-    } else {
-      u8g2.print('P');
-      u8g2.print(' ');
-      u8g2.print(localRXMessage[1]);
-      u8g2.print(' ');
-      for (int i=0; i<NUM_VOICES; i++){
-        if (localRXMessage[i+2] != 0xFF) {
-          u8g2.print(localRXMessage[i+2]);
-          u8g2.print(' ');
-        } else {
-          break;
-        }
-      }
-    }
-    */
     u8g2.sendBuffer();                   // transfer internal memory to the display
 
     digitalToggle(LED_BUILTIN);          // Toggle LED
@@ -522,6 +434,79 @@ inline int32_t renderWave(uint32_t phase, uint8_t wavetype) {
   return 0;
 }
 
+#define SAMPLE_BUFFER_SIZE 128
+uint8_t sampleBuffer0[SAMPLE_BUFFER_SIZE/2];
+uint8_t sampleBuffer1[SAMPLE_BUFFER_SIZE/2];
+volatile bool writeBuffer1 = false;
+
+void sampleISR() {
+  static uint32_t readCtr = 0;
+
+  if (readCtr == SAMPLE_BUFFER_SIZE/2) {
+    readCtr = 0;
+    writeBuffer1 = !writeBuffer1;
+    xSemaphoreGiveFromISR(sysState.buffer_semaphore, NULL);
+  }
+    
+  if (writeBuffer1)
+    analogWrite(OUTR_PIN, sampleBuffer0[readCtr++]);
+  else
+    analogWrite(OUTR_PIN, sampleBuffer1[readCtr++]);
+}
+
+void generateWaveTask(void * pvParameters) {
+  const TickType_t xFrequency = 10/portTICK_PERIOD_MS;
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+
+  while (true) {
+    xSemaphoreTake(sysState.buffer_semaphore, portMAX_DELAY);
+
+    static uint32_t phaseAcc[NUM_VOICES];
+    int32_t mixedSound = 0;
+    uint8_t localCurrentWaveState = currentWaveState.load(std::memory_order_acquire);
+
+	  for (uint32_t writeCtr = 0; writeCtr < SAMPLE_BUFFER_SIZE/2; writeCtr++) {
+
+      for (int i = 0; i < NUM_VOICES; i++) {
+        if (currentStepSize[i]) {
+          phaseAcc[i] += currentStepSize[i];
+          mixedSound += renderWave(phaseAcc[i], localCurrentWaveState);
+        }
+      }
+
+      // Divide sound across voices equally
+      mixedSound = mixedSound / NUM_VOICES;
+
+      // Apply low-pass filter ONLY for sine wave
+      static float prevFiltered = 0.0f;
+      if (localCurrentWaveState == WAVE_SINE) {
+        // Convert to float -1.0 .. 1.0 for filtering
+        float normalized = ((float)mixedSound / 128.0f) - 1.0f;
+
+        // One-pole IIR filter
+        const float alpha = 0.05f;  // adjust for cutoff frequency
+        float filtered = prevFiltered + alpha * (normalized - prevFiltered);
+        prevFiltered = filtered;
+
+        // Convert back to int for PWM
+        mixedSound = (int32_t)((filtered + 1.0f) * 128.0f);
+
+        mixedSound = mixedSound << SINE_FACTOR;
+      }
+
+      mixedSound = mixedSound >> (8 - knob3.get());
+
+      uint32_t Vout = chorusWave(tremoloWave(mixedSound));
+
+      if (writeBuffer1)
+        sampleBuffer1[writeCtr] = Vout + 128;
+      else
+        sampleBuffer0[writeCtr] = Vout + 128;
+    }
+  }
+}
+
+/*
 void sampleISR() {
   static uint32_t phaseAcc[NUM_VOICES];
   int32_t mixedSound = 0;
@@ -558,6 +543,7 @@ void sampleISR() {
 
   analogWrite(OUTR_PIN, chorusWave(tremoloWave(mixedSound) + 128));
 }
+*/
 
 void CAN_TX_ISR (void) {
 	xSemaphoreGiveFromISR(sysState.tx_message_mutex, NULL);
@@ -595,6 +581,8 @@ void setup() {
   sysState.mutex = xSemaphoreCreateMutex();
   sysState.rx_message_mutex = xSemaphoreCreateMutex();
   sysState.tx_message_mutex = xSemaphoreCreateCounting(3,3);
+  sysState.buffer_semaphore = xSemaphoreCreateBinary();
+  xSemaphoreGive(sysState.buffer_semaphore);
 
   TaskHandle_t scanKeysHandle = NULL;
     xTaskCreate(
@@ -640,6 +628,15 @@ void setup() {
     NULL,			       
     1,			           
     &transmitHandle );
+
+  TaskHandle_t generateWaveHandle = NULL;
+    xTaskCreate(
+    generateWaveTask,		    
+    "generateWave",
+    64,      		    
+    NULL,			       
+    1,			           
+    &generateWaveHandle );
 
   msgInQ = xQueueCreate(36,8);
   msgOutQ = xQueueCreate(36,8);
