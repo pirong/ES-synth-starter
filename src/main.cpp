@@ -151,7 +151,7 @@ void scanKeysTask(void * pvParameters) {
         TX_Message[i+2] = 0xFF;
 
     }
-    TX_Message[1] = 4;
+    TX_Message[1] = 2 + device_num.load(std::memory_order_acquire); // Octave number (2, 3, or 4)
     xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
   }
 }
@@ -293,10 +293,10 @@ void displayUpdateTask(void * pvParameters) {
         u8g2.setDrawColor(0);
         u8g2.drawBox(40, 0, 98, 32); // Clear right side of display
         u8g2.setDrawColor(1);
-        
+
         u8g2.setCursor(45,10);
         u8g2.print("Keyboard: ");
-        u8g2.print(device_num, DEC);
+        u8g2.print(device_num.load(std::memory_order_acquire), DEC);
 
         u8g2.setCursor(45,20);
         u8g2.print("Octave: ");
@@ -428,7 +428,11 @@ void decodeTask(void * pvParameters) {
       for (int i=0; i<NUM_VOICES; i++){
         uint8_t localCurrentStepNumber = localRXMessage[i+2];
         if (localCurrentStepNumber != 0xFF) {
-          localCurrentStepSize = stepSizes[localCurrentStepNumber] << (octaveNumber - 4);
+          if (octaveNumber >= 4) {
+            localCurrentStepSize = stepSizes[localCurrentStepNumber] << (octaveNumber - 4);
+          } else {
+            localCurrentStepSize = stepSizes[localCurrentStepNumber] >> (4 - octaveNumber);
+          }
           __atomic_store_n(&currentStepSize[i], localCurrentStepSize, __ATOMIC_RELAXED);
         }
       }

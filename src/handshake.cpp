@@ -1,3 +1,4 @@
+#include <atomic>
 #include <bitset>
 #include <Arduino.h>
 #include <ES_CAN.h>
@@ -5,7 +6,7 @@
 
 #include "main.h"
 
-uint8_t device_num = 0;
+std::atomic<uint8_t> device_num = 0;
 
 bool readWestHandshake() {
   setRow(5);
@@ -47,6 +48,7 @@ void handshakeTask(void * pvParameters) {
     setEastHandshake(1);
 
     bool westEnabled = readWestHandshake();
+    uint8_t localDeviceNum = 0;
     
     if (westEnabled) {
       
@@ -57,17 +59,19 @@ void handshakeTask(void * pvParameters) {
         // First module detected
       } 
 
-      device_num = 0;
+      localDeviceNum = 0;
 
     } else {
       bool eastEnabled = readEastHandshake();
       if (eastEnabled == false) {
         // Last module detected
-        device_num = 2;
+        localDeviceNum = 2;
       } else {
         // Middle module detected
-        device_num = 1;
+        localDeviceNum = 1;
       }
     }
+
+    device_num.store(localDeviceNum, std::memory_order_release);
   }
 }

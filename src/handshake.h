@@ -3,6 +3,6 @@
 
 void handshakeTask(void * pvParameters);
 
-extern uint8_t device_num;
+extern std::atomic<uint8_t> device_num;
 
 #endif
