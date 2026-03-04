@@ -5,6 +5,8 @@
 
 #include "main.h"
 
+uint8_t device_num = 0;
+
 bool readWestHandshake() {
   setRow(5);
   delayMicroseconds(3);
@@ -33,85 +35,39 @@ void setEastHandshake(uint8_t pinVal) {
   digitalWrite(REN_PIN, 1);         // Enable selected row
 }
 
-void determinePosition() {
+void handshakeTask(void * pvParameters) {
 
-  // Set W and E handshake ON
-  setWestHandshake(1);
-  setEastHandshake(1);
+  const TickType_t xFrequency = 100/portTICK_PERIOD_MS;
+  TickType_t xLastWakeTime = xTaskGetTickCount();
 
-  // Set delay for other handshake outputs
-  delay(1);             
+  while (true) {
+    vTaskDelayUntil( &xLastWakeTime, xFrequency );
+    // Set W and E handshake ON
+    setWestHandshake(1);
+    setEastHandshake(1);
 
-  bool westEnabled = readWestHandshake();
-  
-  if (westEnabled == false) {
+    bool westEnabled = readWestHandshake();
     
-    bool eastEnabled = readEastHandshake();
-    
-    uint32_t id = HAL_GetUIDw0();
-    if (eastEnabled) {
-      // Only module, end handshaking here
-      id = 0xFFFF;
-      device_count = 0;
+    if (westEnabled) {
+      
+      bool eastEnabled = readEastHandshake();
+      if (eastEnabled) {
+        // Only module detected
+      } else {
+        // First module detected
+      } 
+
+      device_num = 0;
+
     } else {
-      // First module in series, mark position 0
-      uint8_t TX_Message[8];
-      memcpy(TX_Message, &id, sizeof(uint32_t));
-      TX_Message[4] = 0;
-      CAN_TX(0x122, TX_Message);
-    } 
-
-    device_id[device_count] = id;
-    device_position[device_count] = 0;
-
-    // Set East handshake output OFF
-    setEastHandshake(0);
-  
-  }
-  /*
-  else {
-    while (readWestHandshake()) {
-      uint8_t RX_Message[8];
-	    uint32_t ID;
-      CAN_RX(ID, RX_Message);
-      if (ID == 0x122) {
-        if (device_count < MAX_DEVICES) {
-
-          uint32_t received_id;
-
-          // Extract first 4 bytes (little endian)
-          received_id  =  (uint32_t)RX_Message[0];
-          received_id |= ((uint32_t)RX_Message[1] << 8);
-          received_id |= ((uint32_t)RX_Message[2] << 16);
-          received_id |= ((uint32_t)RX_Message[3] << 24);
-
-          device_id[device_count] = received_id;
-          device_position[device_count]  = RX_Message[4];
-
-          device_count++;
-        }
+      bool eastEnabled = readEastHandshake();
+      if (eastEnabled == false) {
+        // Last module detected
+        device_num = 2;
+      } else {
+        // Middle module detected
+        device_num = 1;
       }
     }
-    
-    // Broadcast new handshaking message
-    uint8_t TX_Message[8];
-    uint32_t id = HAL_GetUIDw0();
-    memcpy(TX_Message, &id, sizeof(uint32_t));
-    TX_Message[4] = device_count;
-    CAN_TX(0x122, TX_Message);
-
-    device_id[device_count] = id;
-    device_position[device_count] = 1;
-
-    // Set East Handshake off
-    setEastHandshake(0);
-
-    if (!readEastHandshake()) {
-      
-      // 7 bytes + null terminator
-      uint8_t TX_Message[8] = "CAN-FIN";
-      CAN_TX(0x122, TX_Message);
-    }
   }
-    */
 }

@@ -8,6 +8,7 @@
 #include <STM32FreeRTOS.h>
 
 #include "chorus.h"
+#include "handshake.h"
 #include "joystick.h"
 #include "main.h"
 #include "knob.h"
@@ -35,8 +36,6 @@ std::atomic<uint8_t> currentWaveState = WAVE_SAW;
 
 //Display driver object
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
-
-HardwareTimer sampleTimer(TIM1);
 
 const int8_t semitoneOffsets[12] = {
     -9, -8, -7, -6,
@@ -181,6 +180,7 @@ void displayUpdateTask(void * pvParameters) {
     const char* menuItems[4] = { "MENU", "WAVE", "CHOR", "TREM" };
     static uint8_t selectedMenu = 0;
     static uint8_t topMenuIndex = 0;     // Keeps track of the scrolling window
+    static bool showDefaultMenu = false; // Tracks if we are inside the MENU options
     static bool showWaveMenu = false;    // Tracks if we are inside the WAVE options
     static bool showChorusMenu = false;  // Tracks if we are inside the CHORUS options
     static bool showTremeloMenu = false; // Tracks if we are inside the TREMELO options
@@ -194,7 +194,11 @@ void displayUpdateTask(void * pvParameters) {
 
     // Only update selection when direction changes
     if (dir != lastDir) {
-        if (showWaveMenu) {
+        if (showDefaultMenu) {
+          if (dir == Joystick::WEST) { 
+                showDefaultMenu = false; // Exit MENU sub-menu
+            }
+        } else if (showWaveMenu) {
             // Sub-menu navigation
             if (dir == Joystick::EAST) {
                 if (selectedWave == 3) {
@@ -230,6 +234,8 @@ void displayUpdateTask(void * pvParameters) {
                 selectedMenu = (selectedMenu + 1) % 4;
             } else if (dir == Joystick::NORTH) {
                 selectedMenu = (selectedMenu + 3) % 4;
+            }else if (dir == Joystick::EAST && selectedMenu == 0) { 
+                showDefaultMenu = true; // Enter MENU sub-menu (Index 0)
             } else if (dir == Joystick::EAST && selectedMenu == 1) { 
                 showWaveMenu = true; // Enter WAVE sub-menu (Index 1)
             } else if (dir == Joystick::EAST && selectedMenu == 2) { 
@@ -282,7 +288,28 @@ void displayUpdateTask(void * pvParameters) {
     u8g2.setDrawColor(1);
 
     // Draw Wave Sub-menu
-    if (showWaveMenu) {
+    if (showDefaultMenu) {
+
+        u8g2.setDrawColor(0);
+        u8g2.drawBox(40, 0, 98, 32); // Clear right side of display
+        u8g2.setDrawColor(1);
+        
+        u8g2.setCursor(45,10);
+        u8g2.print("Keyboard: ");
+        u8g2.print(device_num, DEC);
+
+        u8g2.setCursor(45,20);
+        u8g2.print("Octave: ");
+        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+        uint8_t localOctave = sysState.RX_Message[1];
+        xSemaphoreGive(sysState.mutex);
+        u8g2.print(localOctave, DEC);
+
+        u8g2.setCursor(45,30);
+        u8g2.print("Volume: ");
+        u8g2.print(knob3.get(), DEC);
+
+    } else if (showWaveMenu) {
         uint8_t y = 10;
         uint8_t x = 40;        // Start X offset to the right of the main menu
         uint8_t spacing = 6;   // Pixels between words
@@ -645,10 +672,6 @@ void setup() {
   initStepSizes();
   initSineTable();
 
-  sampleTimer.setOverflow(22000, HERTZ_FORMAT);
-  // sampleTimer.attachInterrupt(sampleISR);
-  sampleTimer.resume();
-
   sysState.mutex = xSemaphoreCreateMutex();
   sysState.rx_message_mutex = xSemaphoreCreateMutex();
   sysState.tx_message_mutex = xSemaphoreCreateCounting(3,3);
@@ -710,6 +733,15 @@ void setup() {
     2,			           
     &dacWaveGenHandle );
 
+  TaskHandle_t handshakeHandle = NULL;
+    xTaskCreate(
+    handshakeTask,		    
+    "handshake",
+    64,      		    
+    NULL,			       
+    1,			           
+    &handshakeHandle );
+
   msgInQ = xQueueCreate(36,8);
   msgOutQ = xQueueCreate(36,8);
 
@@ -720,7 +752,7 @@ void setup() {
   CAN_RegisterTX_ISR(CAN_TX_ISR);
   CAN_Start();
 
-  determinePosition();
+  //determinePosition();
 
   //Set pin directions
   pinMode(RA0_PIN, OUTPUT);

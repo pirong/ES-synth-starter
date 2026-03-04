@@ -41,11 +41,6 @@ void setRow(uint8_t rowIdx);
 
 std::bitset<4> readCols();
 
-#define MAX_DEVICES 10
-inline uint32_t device_id[MAX_DEVICES];
-inline uint8_t device_position[MAX_DEVICES];
-inline uint8_t device_count = 0;
-
 void determinePosition();
 
 #endif
